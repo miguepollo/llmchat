@@ -1,0 +1,91 @@
+# Genera binarios de release para Linux, Windows y macOS de forma nativa.
+# - Linux: ubuntu (glibc) y musl estático (x86_64)
+# - Windows: x86_64 MSVC
+# - macOS: x86_64 y Apple Silicon (aarch64)
+#
+# Se ejecuta al hacer push a la rama principal, en pull requests y al
+# crear una etiqueta v*. Los binarios se suben como artefactos y, en las
+# etiquetas, como release de GitHub.
+
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64-gnu
+            distro: apt
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: linux-x86_64-musl
+            distro: apt
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dependencias de sistema necesarias para compilar eframe/winit.
+      - name: Instalar dependencias de sistema (Linux)
+        if: matrix.distro == 'apt'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev \
+            libgl1-mesa-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev 
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Compilar (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Empaquetar binario
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/llmchat.exe" "dist/llmchat-${{ matrix.name }}.exe"
+          else
+            cp "target/${{ matrix.target }}/release/llmchat" "dist/llmchat-${{ matrix.name }}"
+          fi
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: llmchat-${{ matrix.name }}
+          path: dist/
+
+      # En etiquetas v*, publica además un Release de GitHub con los binarios.
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false

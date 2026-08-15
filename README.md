@@ -1,4 +1,4 @@
-# Msty Studio
+# LLMchat
 
 Cliente de chat **ligero y nativo** para APIs **OpenAI-compatible**, escrito en Rust con
 [egui/eframe](https://github.com/emilk/egui). Un solo binario, sin Electron, sin dependencias
@@ -10,6 +10,9 @@ pesadas. Sin MCPs ni modelos locales: solo se necesita un endpoint OpenAI-compat
 - ⚙️ Configurable para cualquier API OpenAI-compatible (OpenAI, proveedores de terceros, proxies, etc.)
 - 📝 Renderizado de **Markdown** (negritas, código con botón copiar, listas, citas, encabezados)
 - 🗂️ Historial de conversaciones persistido en disco
+- ✏️ Renombra tus conversaciones (botón ✎ en la tarjeta o en la cabecera)
+- 📎 Adjunta archivos al chat: imágenes (con vista previa) + extracción de texto
+  de **PDF**, **EPUB** y archivos de texto (TXT/MD/JSON/CSV…)
 - 🖥️ Ventana nativa, ligera y rápida
 
 ## Requisitos
@@ -24,8 +27,48 @@ cargo run
 
 # binario optimizado y pequeño
 cargo build --release
-./target/release/msty_studio.exe
+./target/release/llmchat.exe   # Windows
+./target/release/llmchat       # Linux / macOS
 ```
+
+### Compilar en Linux
+
+En Linux (o Windows con WSL2) se compila de forma **nativa**:
+
+```sh
+# Debian / Ubuntu: dependencias de sistema para la ventana (egui/winit)
+sudo apt-get update
+sudo apt-get install -y \
+  libx11-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
+
+cargo build --release
+```
+
+> El binario de Windows no se puede "convertir" a Linux: hay que compilar en
+> Linux o usando el CI (abajo). WSL2 no está activado por defecto en Windows;
+> habilitarlo requiere la "Plataforma de máquina virtual" y un reinicio.
+
+### Binarios automáticos (GitHub Actions)
+
+El repositorio incluye un workflow (`.github/workflows/build.yml`) que compila
+**de forma nativa** y sube binarios de release para:
+
+- Linux `x86_64` (glibc) y `x86_64` **estático (musl)**
+- Windows `x86_64`
+- macOS `x86_64` y Apple Silicon (`aarch64`)
+
+Se ejecuta al hacer push, en pull requests, y en cada etiqueta `v*` publica
+además un **Release de GitHub** con los binarios descargables.
+Para activarlo: sube el proyecto a GitHub y crea una etiqueta, p. ej.:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Los artefactos de cada build quedan disponibles en la página **Actions** del
+repositorio sin necesidad de crear una etiqueta.
 
 ## Configuración
 
@@ -37,13 +80,34 @@ En la ventana pulsa **Ajustes** y rellena:
 | API key | Tu clave de API (se guarda en el archivo de configuración local) | `sk-...` |
 | Modelo | Nombre del modelo a usar | `gpt-4o-mini` |
 | Temperatura | 0.0 (preciso) – 1.0 (creativo) – 2.0 (máximo) | `0.7` |
+| Tamaño de letra | Tamaño de la fuente de toda la interfaz (0.75× – 1.5×) | `1.0` |
 | Prompt de sistema | Instrucciones globales opcionales | `Eres un asistente útil` |
 
 La app añade `/chat/completions` a la URL base automáticamente (si la URL no lo incluye ya).
 Envíos con **Enter**; **Shift+Enter** para un salto de línea.
 
+## Adjuntar archivos
+
+Pulsa el botón **📎** junto al campo del mensaje y selecciona uno o varios archivos:
+
+- **Imágenes** (PNG, JPG, GIF, WebP, BMP, TIFF): se muestran como **vista previa**
+  y se **envían al modelo** en base64 (formato OpenAI multimodal:
+  `content: [ {type:text}, {type:image_url, url:data:image/...;base64,...} ]`).
+- **PDF**: se **extrae el texto** y además se extraen las **imágenes embebidas**
+  (JPEG/DCT y RGB/Gris/CMYK con FlateDecode), que también se envían al modelo.
+- **EPUB**: se extrae el texto y se adjunta como contexto para el modelo.
+- **Texto** (TXT, MD, JSON, CSV, LOG, TOML, YAML): se envía su contenido.
+- El texto extraído se añade automáticamente a ese mensaje del usuario; está
+  limitado a los primeros **150 000 caracteres** para no saturar el historial.
+
+> **Multimodal**: la app usa el estándar de OpenAI para visión. Necesitarás un
+> modelo que soporte imágenes (por ejemplo `gpt-4o`, `gpt-4o-mini`, `claude-*`,
+> `llama-3.2-vision`, etc.). Si el modelo no es multimodal, suele responder que
+> no puede ver las imágenes; el texto extraído de PDF/EPUB siempre se envía.
+> Las imágenes se guardan en el historial como data URI base64.
+
 > Nota: la API key se guarda en texto plano en el archivo de configuración local
-> (`%APPDATA%\msty_studio\config.json`). No compartas ese archivo.
+> (`%APPDATA%\llmchat\config.json`). No compartas ese archivo.
 
 ## Estructura
 

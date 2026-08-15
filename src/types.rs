@@ -11,23 +11,81 @@ pub enum Role {
     Assistant,
 }
 
+/// Tipo de archivo adjunto en un mensaje.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    Pdf,
+    Epub,
+    Text,
+    Other,
+}
+
+impl AttachmentKind {
+    /// Etiqueta corta legible para la interfaz.
+    pub fn label(self) -> &'static str {
+        match self {
+            AttachmentKind::Image => "Imagen",
+            AttachmentKind::Pdf => "PDF",
+            AttachmentKind::Epub => "EPUB",
+            AttachmentKind::Text => "Texto",
+            AttachmentKind::Other => "Archivo",
+        }
+    }
+}
+
+/// Un archivo adjuntado a un mensaje. El texto extraído (PDF/EPUB/TXT) se
+/// guarda dentro de `Message::content`; aquí solo queda la referencia ligera.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub kind: AttachmentKind,
+    pub name: String,
+    /// Línea corta que se muestra al lado del adjunto.
+    pub summary: String,
+    /// Ruta del archivo si es una imagen (para mostrar la vista previa).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_file: Option<String>,
+    /// Data URI base64 de la imagen: `data:image/png;base64,...`.
+    /// Se usa para enviar la imagen al modelo (multimodal) y para mostrarla.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_data: Option<String>,
+}
+
+impl Attachment {
+    /// `true` si el adjunto es una imagen lista para enviar al modelo.
+    pub fn is_sendable_image(&self) -> bool {
+        self.kind == AttachmentKind::Image && self.image_data.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Texto de razonamiento ("thinking") previo a la respuesta final.
+    /// Solo lo usan los modelos que soportan `reasoning_content`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
+        Self { role: Role::User, content: content.into(), reasoning: String::new(), attachments: Vec::new() }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self { role: Role::Assistant, content: content.into(), reasoning: String::new(), attachments: Vec::new() }
     }
 
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
+        Self { role: Role::System, content: content.into(), reasoning: String::new(), attachments: Vec::new() }
+    }
+
+    pub fn user_with_attachments(content: impl Into<String>, attachments: Vec<Attachment>) -> Self {
+        Self { role: Role::User, content: content.into(), reasoning: String::new(), attachments }
     }
 }
 

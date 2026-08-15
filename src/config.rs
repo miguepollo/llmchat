@@ -11,6 +11,16 @@ pub struct Settings {
     pub temperature: f32,
     pub system_prompt: String,
     pub models: Vec<String>,
+    /// Factor de escala del tamaño de letra de toda la interfaz (0.75…1.5).
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
+}
+
+/// Valor por defecto para `Settings::font_scale`. Necesario porque
+/// `#[serde(default)]` a nivel de struct daría 0.0 para campos ausentes
+/// (configuraciones guardadas antes de que existiera este campo).
+fn default_font_scale() -> f32 {
+    1.0
 }
 
 impl Default for Settings {
@@ -27,15 +37,16 @@ impl Default for Settings {
                 "gpt-4.1".to_string(),
                 "gpt-4.1-mini".to_string(),
             ],
+            font_scale: 1.0,
         }
     }
 }
 
 pub fn data_dir() -> PathBuf {
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        PathBuf::from(appdata).join("msty_studio")
+        PathBuf::from(appdata).join("llmchat")
     } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config").join("msty_studio")
+        PathBuf::from(home).join(".config").join("llmchat")
     } else {
         PathBuf::from(".")
     }
