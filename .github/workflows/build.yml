@@ -55,6 +55,12 @@ jobs:
             libgl1-mesa-dev libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev 
 
+      # Toolchain C cruzada para el target estático musl: proporciona
+      # `x86_64-linux-musl-gcc` (necesaria para compilar `ring` y enlazar).
+      - name: Instalar toolchain musl (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

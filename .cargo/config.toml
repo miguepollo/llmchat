@@ -1,0 +1,5 @@
+# Linker para el build estático musl (usado por el CI de GitHub Actions).
+# `musl-tools` instala `x86_64-linux-musl-gcc`, necesario para compilar el
+# código C de crates como `ring` (cripto de rustls) y para enlazar el binario.
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
