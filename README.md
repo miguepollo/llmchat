@@ -52,23 +52,38 @@ cargo build --release
 ### Binarios automáticos (GitHub Actions)
 
 El repositorio incluye un workflow (`.github/workflows/build.yml`) que compila
-**de forma nativa** y sube binarios de release para:
+**de forma nativa** y publica binarios para:
 
 - Linux `x86_64` (glibc) y `x86_64` **estático (musl)**
 - Windows `x86_64`
 - macOS `x86_64` y Apple Silicon (`aarch64`)
 
-Se ejecuta al hacer push, en pull requests, y en cada etiqueta `v*` publica
-además un **Release de GitHub** con los binarios descargables.
-Para activarlo: sube el proyecto a GitHub y crea una etiqueta, p. ej.:
+Se ejecuta al hacer push, en pull requests y al crear etiquetas `v*`:
+
+- **Cada push a `main`**: los binarios se suben como artefactos y se publica /
+  actualiza automáticamente un Release continuo llamado **"Continuous build"**
+  en la pestaña *Releases*.
+- **Etiqueta `v*`**: se publica un **Release estable** con los binarios
+  descargables. Para crearlo:
 
 ```sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Los artefactos de cada build quedan disponibles en la página **Actions** del
+Los artefactos de cada build también quedan en la página **Actions** del
 repositorio sin necesidad de crear una etiqueta.
+
+## Autoactualización
+
+La app comprueba al arrancar (y desde **Ajustes → Actualizaciones**) si la
+última **release estable** de GitHub es más nueva que la versión instalada.
+Si hay una versión nueva, pulsa **"Descargar e instalar"**: la app descarga el
+binario de tu plataforma, se cierra, lo reemplaza y se relanza con la versión
+actualizada.
+
+Para publicar una actualización que la app detecte, sube una etiqueta `v*` más
+alta que la versión actual de `Cargo.toml` (p. ej. `git tag v0.2.0`).
 
 ## Configuración
 

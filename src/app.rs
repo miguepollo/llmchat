@@ -3,6 +3,7 @@ use crate::config::{self, Settings};
 use crate::files;
 use crate::markdown::{self, scaled_size as fs};
 use crate::types::{Attachment, Conversation, Message, Role};
+use crate::update::{self, ReleaseInfo};
 use eframe::egui;
 use eframe::egui::{Align2, Color32, CornerRadius, FontId, Margin, Stroke, StrokeKind};
 use std::collections::HashMap;
@@ -49,6 +50,31 @@ enum SidebarAction {
     CommitRename(String, String),
 }
 
+/// Resultado de las tareas de autoactualización (comprobación / instalación).
+enum UpdateEvent {
+    /// Comprobación terminada: `Ok(Some)` si hay actualización, `Ok(None)` si no.
+    Checked(Result<Option<ReleaseInfo>, String>),
+    /// La descarga + instalación terminó (o falló). En caso de éxito la app
+    /// se cierra sola para que el reemplazo del binario pueda completarse.
+    Install(Result<(), String>),
+}
+
+/// Estado de la autoactualización, tal y como se muestra en Ajustes.
+enum UpdateStatus {
+    /// No se ha comprobado aún.
+    Idle,
+    /// Comprobando / descargando en segundo plano.
+    Checking,
+    /// No hay versiones más nuevas.
+    UpToDate,
+    /// Hay una versión más nueva lista para instalar.
+    Available(ReleaseInfo),
+    /// Descargando e instalando la actualización.
+    Downloading,
+    /// Fallo al comprobar o instalar.
+    Error(String),
+}
+
 pub struct App {
     settings: Settings,
     conversations: Vec<Conversation>,
@@ -79,6 +105,10 @@ pub struct App {
     base_style: egui::Style,
     /// Último `font_scale` aplicado al estilo (evita re-aplicarlo cada frame).
     applied_font_scale: f32,
+    /// Estado de la autoactualización para la UI de Ajustes.
+    update_status: UpdateStatus,
+    /// Canal con los resultados de las tareas de actualización.
+    update_rx: Option<mpsc::UnboundedReceiver<UpdateEvent>>,
 }
 
 impl App {
@@ -122,7 +152,7 @@ impl App {
             conversations.push(Conversation::new());
         }
         let current_id = conversations.first().map(|c| c.id.clone());
-        Self {
+        let mut app = Self {
             settings: config::load_settings(),
             conversations,
             current_id,
@@ -147,7 +177,14 @@ impl App {
             runtime,
             base_style,
             applied_font_scale: 1.0,
-        }
+            update_status: UpdateStatus::Idle,
+            update_rx: None,
+        };
+
+        // Comprueba actualizaciones en segundo plano al arrancar.
+        app.trigger_update_check();
+
+        app
     }
 
     fn conversation(&self, id: &str) -> Option<&Conversation> {
@@ -535,6 +572,84 @@ impl App {
         }
     }
 
+    /// Lanza la comprobación de actualizaciones en segundo plano.
+    fn trigger_update_check(&mut self) {
+        if matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading
+        ) {
+            return;
+        }
+        self.update_status = UpdateStatus::Checking;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.update_rx = Some(rx);
+        let handle = self.runtime.clone();
+        handle.spawn(async move {
+            let _ = tx.send(UpdateEvent::Checked(update::check_latest_release().await));
+        });
+    }
+
+    /// Descarga e instala la actualización disponible en segundo plano.
+    fn start_update_install(&mut self) {
+        let UpdateStatus::Available(info) = &self.update_status else {
+            return;
+        };
+        let info = info.clone();
+        self.update_status = UpdateStatus::Downloading;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.update_rx = Some(rx);
+        let handle = self.runtime.clone();
+        handle.spawn(async move {
+            let result = match update::download_asset(&info.download_url, &info.asset_name).await {
+                Ok(path) => update::install_and_restart(&path),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(UpdateEvent::Install(result));
+        });
+    }
+
+    /// Recoge los resultados de las tareas de actualización.
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        let Some(mut rx) = self.update_rx.take() else {
+            return;
+        };
+        let mut disconnected = false;
+        let mut events: Vec<UpdateEvent> = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(ev) => events.push(ev),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if !disconnected {
+            self.update_rx = Some(rx);
+        }
+        for ev in events {
+            match ev {
+                UpdateEvent::Checked(result) => match result {
+                    Ok(Some(info)) => self.update_status = UpdateStatus::Available(info),
+                    Ok(None) => self.update_status = UpdateStatus::UpToDate,
+                    Err(e) => self.update_status = UpdateStatus::Error(e),
+                },
+                UpdateEvent::Install(result) => match result {
+                    Ok(()) => {
+                        // La instalación ya está lanzada: guarda datos pendientes
+                        // y sale para que el reemplazo del binario pueda completarse.
+                        self.save_if_needed();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        std::process::exit(0);
+                    }
+                    Err(e) => self.update_status = UpdateStatus::Error(e),
+                },
+            }
+        }
+        ctx.request_repaint();
+    }
+
 }
 
 impl eframe::App for App {
@@ -542,6 +657,7 @@ impl eframe::App for App {
         self.poll_stream();
         self.poll_models();
         self.poll_imports(ctx);
+        self.poll_update(ctx);
 
         // ---------- Tamaño de letra global ----------
         // Reescala los estilos de texto (Body, Small, Monospace, botones, etc.)
@@ -1086,6 +1202,70 @@ impl eframe::App for App {
                             .desired_rows(3)
                             .desired_width(f32::INFINITY),
                     );
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Actualizaciones");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("v{}", update::current_version()))
+                                    .color(TEXT_DIM),
+                            );
+                        });
+                    });
+                    match &self.update_status {
+                        UpdateStatus::Idle | UpdateStatus::Checking => {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new());
+                                ui.label("Buscando actualizaciones...");
+                            });
+                        }
+                        UpdateStatus::UpToDate => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Estás al día (v{}).",
+                                    update::current_version()
+                                ))
+                                .color(TEXT_DIM),
+                            );
+                        }
+                        UpdateStatus::Available(info) => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Actualización disponible: {}",
+                                    info.version
+                                ))
+                                .color(Color32::from_rgb(126, 231, 135)),
+                            );
+                        }
+                        UpdateStatus::Downloading => {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new());
+                                ui.label("Descargando e instalando...");
+                            });
+                        }
+                        UpdateStatus::Error(e) => {
+                            ui.label(
+                                egui::RichText::new(format!("Error: {e}"))
+                                    .color(Color32::from_rgb(230, 100, 100)),
+                            );
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if matches!(&self.update_status, UpdateStatus::Available(_))
+                            && ui.button("⬇  Descargar e instalar").clicked()
+                        {
+                            self.start_update_install();
+                        }
+                        let busy = matches!(
+                            &self.update_status,
+                            UpdateStatus::Checking | UpdateStatus::Downloading
+                        );
+                        if !busy && ui.button("🔍 Buscar actualizaciones").clicked() {
+                            self.trigger_update_check();
+                        }
+                    });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Guardar").clicked() {

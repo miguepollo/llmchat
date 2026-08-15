@@ -4,8 +4,11 @@
 # - macOS: x86_64 y Apple Silicon (aarch64)
 #
 # Se ejecuta al hacer push a la rama principal, en pull requests y al
-# crear una etiqueta v*. Los binarios se suben como artefactos y, en las
-# etiquetas, como release de GitHub.
+# crear una etiqueta v*.
+# - Cada push a main: los binarios se suben como artefactos y se publica/actualiza
+#   un Release continuo llamado "Continuous build" (prerelease).
+# - Etiqueta v*: se publica un Release versionado con los binarios.
+# - Pull requests: solo artefactos (sin release).
 
 name: build
 
@@ -14,6 +17,9 @@ on:
     branches: [ main, master ]
     tags: [ 'v*' ]
   pull_request:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -88,10 +94,44 @@ jobs:
           name: llmchat-${{ matrix.name }}
           path: dist/
 
-      # En etiquetas v*, publica además un Release de GitHub con los binarios.
-      - name: Publicar release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # Reúne los binarios de todos los builds y publica (o actualiza) un Release.
+  # - En cada push a main: "Continuous build" (prerelease, siempre disponible).
+  # - En etiquetas v*: Release versionado con los binarios.
+  publish:
+    name: Publicar release
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: llmchat-*
+          path: dist
+          merge-multiple: true
+
+      - name: Determinar release (versionada o continua)
+        id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "name=$TAG" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "body=Publicado automáticamente desde ${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=continuous" >> "$GITHUB_OUTPUT"
+            echo "name=Continuous build" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "body=Binarios del último commit en main (${GITHUB_SHA:0:7}). Usa una etiqueta v* para publicar un release estable." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publicar / actualizar release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
           files: dist/*
-          draft: false
+          body: ${{ steps.meta.outputs.body }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          update_release: true
+          fail_on_unmatched_files: false

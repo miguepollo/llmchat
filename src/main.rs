@@ -6,6 +6,7 @@ mod config;
 mod files;
 mod markdown;
 mod types;
+mod update;
 
 use eframe::egui;
 
