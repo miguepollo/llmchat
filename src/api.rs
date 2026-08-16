@@ -279,7 +279,10 @@ enum StreamDelta {
 }
 
 /// Analiza un evento SSE completo: recoge todas las líneas `data:` del evento
-/// (pueden ser varias) y las une antes de interpretar el JSON.
+/// (pueden ser varias) y las une antes de interpretar el JSON. El formato es
+/// el estándar SSE de las APIs OpenAI-compatible, compartido por la mayoría de
+/// proveedores (OpenAI/ChatGPT, DeepSeek, Kimi, GLM, Mistral, etc.), que es
+/// también el que esta app soporta.
 fn parse_sse_chunk(chunk: &str) -> Option<StreamDelta> {
     let mut data_lines: Vec<String> = Vec::new();
     for line in chunk.lines() {
@@ -299,24 +302,22 @@ fn parse_sse_chunk(chunk: &str) -> Option<StreamDelta> {
         return Some(StreamDelta::Done);
     }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+        // El razonamiento ("thinking") puede llegar en distintos campos según
+        // el proveedor: `reasoning_content` (DeepSeek, Kimi…), `reasoning`
+        // (OpenAI «o» más recientes), `thinking` (Claude)… Probamos todos.
         let delta = &value["choices"][0]["delta"];
-        // Razonamiento ("thinking") primero: algunos modelos emiten solo esto.
-        if let Some(r) = delta["reasoning_content"].as_str() {
-            if !r.is_empty() {
-                return Some(StreamDelta::Reasoning(r.to_string()));
-            }
+        if let Some(r) = delta_reasoning(delta) {
+            return Some(StreamDelta::Reasoning(r));
         }
         if let Some(c) = delta["content"].as_str() {
             if !c.is_empty() {
                 return Some(StreamDelta::Content(c.to_string()));
             }
         }
-        // Fallback a la forma no-streaming del mensaje.
+        // Fallback a la forma no-streaming del mensaje (respuestas completas).
         let message = &value["choices"][0]["message"];
-        if let Some(r) = message["reasoning_content"].as_str() {
-            if !r.is_empty() {
-                return Some(StreamDelta::Reasoning(r.to_string()));
-            }
+        if let Some(r) = delta_reasoning(message) {
+            return Some(StreamDelta::Reasoning(r));
         }
         if let Some(c) = message["content"].as_str() {
             if !c.is_empty() {
@@ -327,9 +328,112 @@ fn parse_sse_chunk(chunk: &str) -> Option<StreamDelta> {
     None
 }
 
+/// Extrae el texto de razonamiento (si lo hay) de un objeto `delta` o
+/// `message`. Sabemos por experiencia que distintos proveedores usan nombres
+/// distintos para este campo, así que probamos los habituales.
+fn delta_reasoning(obj: &serde_json::Value) -> Option<String> {
+    const REASONING_KEYS: [&str; 4] = ["reasoning_content", "reasoning", "thinking", "thought"];
+    for key in REASONING_KEYS {
+        if let Some(r) = obj.get(key).and_then(|v| v.as_str()) {
+            if !r.is_empty() {
+                return Some(r.to_string());
+            }
+        }
+    }
+    None
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrates_full_streaming_flow_with_mock_server() {
+        // Reproduce el flujo completo que la app usa al chatear por streaming:
+        // levanta un servidor HTTP local que emite el SSE estándar
+        // OpenAI-compatible (el mismo formato que usan OpenAI, DeepSeek, Kimi,
+        // Claude, etc.) y comprueba que stream_chat lo reenvía por el canal sin
+        // pánico ni pérdida de eventos.
+        use std::io::{Read, Write as _};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                // Lee la cabecera HTTP hasta '\r\n\r\n' (sin esperar EOF, que el
+                // cliente no envía porque mantiene la conexión abierta).
+                let mut buf = [0u8; 4096];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            total += n;
+                            if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                let body = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Pienso\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" primero\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Hola, \"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"mundo\"}}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream
+                    .write_all(headers.as_bytes())
+                    .and_then(|_| stream.write_all(body.as_bytes()));
+            }
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let settings = crate::config::Settings {
+                base_url: format!("http://{addr}"),
+                api_key: "sk-test".to_string(),
+                model: "deepseek-test".to_string(),
+                temperature: 0.7,
+                system_prompt: String::new(),
+                models: Vec::new(),
+                font_scale: 1.0,
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            stream_chat(&settings, &[crate::types::Message::user("hola")], tx).await;
+
+            let mut got: Vec<String> = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    StreamEvent::Reasoning(r) => got.push(format!("R:{r}")),
+                    StreamEvent::Chunk(c) => got.push(format!("C:{c}")),
+                    StreamEvent::Done => got.push("D".to_string()),
+                    StreamEvent::Error(e) => got.push(format!("E:{e}")),
+                }
+            }
+
+            assert!(got.iter().any(|e| e == "R:Pienso"));
+            assert!(got.iter().any(|e| e == "R: primero"));
+            assert!(got.iter().any(|e| e == "C:Hola, "));
+            assert!(got.iter().any(|e| e == "C:mundo"));
+            assert!(got.iter().any(|e| e == "D"));
+        });
+    }
 
     #[test]
     fn parses_delta_content() {
@@ -418,10 +522,24 @@ mod tests {
 
     #[test]
     fn handles_reasoning_content() {
+        // `reasoning_content`: campo usado por DeepSeek, Kimi y otros.
         let chunk = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"pensando\"}}]}\n\n";
         assert!(
             matches!(parse_sse_chunk(chunk), Some(StreamDelta::Reasoning(s)) if s == "pensando")
         );
+    }
+
+    #[test]
+    fn handles_reasoning_field() {
+        // `reasoning`: campo usado por los modelos de razonamiento de OpenAI
+        // (serie «o», GPT-5, etc.).
+        for key in ["reasoning", "thinking", "thought"] {
+            let chunk = format!("data: {{\"choices\":[{{\"delta\":{{\"{key}\":\"pensando\"}}}}]}}\n\n");
+            assert!(
+                matches!(parse_sse_chunk(&chunk), Some(StreamDelta::Reasoning(s)) if s == "pensando"),
+                "el campo `{key}` debería interpretarse como razonamiento"
+            );
+        }
     }
 
     #[test]
@@ -444,12 +562,17 @@ mod tests {
 
     #[test]
     fn parses_non_streaming_message_reasoning() {
-        // Forma no-streaming: `choices[0].message.reasoning_content`.
-        let chunk = "data: {\"choices\":[{\"message\":{\"reasoning_content\":\"reflexion\",\"content\":\"respuesta\"}}]}\n\n";
-        assert!(matches!(
-            parse_sse_chunk(chunk),
-            Some(StreamDelta::Reasoning(s)) if s == "reflexion"
-        ));
+        // Forma no-streaming (respuesta completa): puede venir en
+        // `message.reasoning_content` (DeepSeek/Kimi) o `message.reasoning` (OpenAI).
+        for key in ["reasoning_content", "reasoning", "thinking"] {
+            let chunk = format!(
+                "data: {{\"choices\":[{{\"message\":{{\"{key}\":\"reflexion\",\"content\":\"respuesta\"}}}}]}}\n\n"
+            );
+            assert!(
+                matches!(parse_sse_chunk(&chunk), Some(StreamDelta::Reasoning(s)) if s == "reflexion"),
+                "el campo no-streaming `{key}` debería interpretarse como razonamiento"
+            );
+        }
     }
 
     #[test]
