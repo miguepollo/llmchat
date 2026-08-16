@@ -890,33 +890,44 @@ impl eframe::App for App {
                             ui.separator();
                             let query = self.model_query.trim().to_lowercase();
                             let total = self.settings.models.len();
-                            let mut shown = 0u32;
-                            let mut last_family: Option<&'static str> = None;
+
+                            // Agrupa los modelos por familia (Claude, DeepSeek,
+                            // ChatGPT…, y "Otros" para los no clasificados),
+                            // manteniendo el orden de primera aparición y
+                            // respetando el filtro de búsqueda.
+                            let mut groups: Vec<(&'static str, Vec<String>)> = Vec::new();
                             for m in &self.settings.models {
-                                if query.is_empty() || m.to_lowercase().contains(&query) {
-                                    shown += 1;
-                                    let fam = model_family(m);
-                                    // Muestra un encabezado de grupo cuando cambia
-                                    // la familia (y sólo si el modelo es visible).
-                                    if fam != last_family {
-                                        last_family = fam;
-                                        ui.add_space(6.0);
-                                        ui.label(
-                                            egui::RichText::new(fam.unwrap_or("Otros"))
-                                                .size(fs(10.5, scale))
-                                                .strong()
-                                                .color(TEXT_DIM),
-                                        );
-                                        ui.separator();
-                                    }
-                                    if ui
-                                        .selectable_value(&mut model, m.clone(), m.as_str())
-                                        .clicked()
-                                    {
-                                        // Cerrar el popup tras elegir un modelo
-                                        egui::Popup::close_all(ui.ctx());
-                                    }
+                                if !query.is_empty() && !m.to_lowercase().contains(&query) {
+                                    continue;
                                 }
+                                let fam = model_family(m).unwrap_or("Otros");
+                                match groups.iter_mut().find(|(f, _)| *f == fam) {
+                                    Some((_, list)) => list.push(m.clone()),
+                                    None => groups.push((fam, vec![m.clone()])),
+                                }
+                            }
+                            let shown: u32 = groups.iter().map(|(_, l)| l.len() as u32).sum();
+
+                            for (fam, list) in &groups {
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new(*fam)
+                                        .size(fs(12.0, scale))
+                                        .strong()
+                                        .color(TEXT_MAIN),
+                                )
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    for m in list {
+                                        if ui
+                                            .selectable_value(&mut model, m.clone(), m.as_str())
+                                            .clicked()
+                                        {
+                                            // Cerrar el popup tras elegir un modelo
+                                            egui::Popup::close_all(ui.ctx());
+                                        }
+                                    }
+                                });
+                                ui.add_space(2.0);
                             }
                             ui.add_space(2.0);
                             if shown == 0 {
