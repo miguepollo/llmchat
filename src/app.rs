@@ -891,9 +891,24 @@ impl eframe::App for App {
                             let query = self.model_query.trim().to_lowercase();
                             let total = self.settings.models.len();
                             let mut shown = 0u32;
+                            let mut last_family: Option<&'static str> = None;
                             for m in &self.settings.models {
                                 if query.is_empty() || m.to_lowercase().contains(&query) {
                                     shown += 1;
+                                    let fam = model_family(m);
+                                    // Muestra un encabezado de grupo cuando cambia
+                                    // la familia (y sólo si el modelo es visible).
+                                    if fam != last_family {
+                                        last_family = fam;
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            egui::RichText::new(fam.unwrap_or("Otros"))
+                                                .size(fs(10.5, scale))
+                                                .strong()
+                                                .color(TEXT_DIM),
+                                        );
+                                        ui.separator();
+                                    }
                                     if ui
                                         .selectable_value(&mut model, m.clone(), m.as_str())
                                         .clicked()
@@ -1663,4 +1678,73 @@ fn render_typing_indicator(ui: &mut egui::Ui, scale: f32) {
             });
     });
     ui.add_space(12.0);
+}
+
+// ---------------------------------------------------------------------------
+// Agrupación de modelos por proveedor/familia
+// ---------------------------------------------------------------------------
+
+/// Devuelve la familia a la que pertenece un id de modelo según su nombre.
+/// Los proveedores agregan un prefijo `proveedor/modelo` (por ejemplo
+/// `deepseek/deepseek-v4`, `openai/gpt-5`, `anthropic/claude-opus-5`,
+/// `qwen/qwen3`, `~x-ai/grok-latest`, etc.); aquí detectamos las familias más
+/// comunes para agruparlas en el selector. Devuelve `None` para modelos que no
+/// encajan en ninguna familia reconocida (se mostrarán en un grupo "Otros").
+fn model_family(id: &str) -> Option<&'static str> {
+    let name = id.to_lowercase();
+
+    // Pares (fragmento, etiqueta). Se comprueban de arriba a abajo y gana la
+    // primera coincidencia: las familias con prefijos más específicos
+    // (gpt-oss, gpt-image, dall-e) van antes que "gpt" y que "o3-…".
+    let families: &[(&str, &str)] = &[
+        ("claude", "Anthropic Claude"),
+        ("deepseek", "DeepSeek"),
+        ("grok", "xAI Grok"),
+        ("gemini", "Google Gemini"),
+        ("gemma", "Google Gemma"),
+        ("gpt-oss", "OpenAI GPT-oss"),
+        ("gpt-image", "OpenAI Imagen"),
+        ("dall-e", "OpenAI DALL·E"),
+        ("gpt", "ChatGPT / OpenAI"),
+        ("openai/o", "ChatGPT / OpenAI"),
+        ("qwen", "Alibaba Qwen"),
+        ("kimi", "Moonshot Kimi"),
+        ("glm", "Zhipu GLM"),
+        ("mistral", "Mistral"),
+        ("mixtral", "Mistral"),
+        ("llama", "Meta Llama"),
+        ("command", "Cohere Command"),
+    ];
+    for (frag, label) in families {
+        if name.contains(frag) {
+            return Some(label);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_family;
+
+    #[test]
+    fn groups_common_providers() {
+        assert_eq!(model_family("~deepseek/deepseek-v4-flash-latest"), Some("DeepSeek"));
+        assert_eq!(model_family("deepseek/deepseek-r1"), Some("DeepSeek"));
+        assert_eq!(model_family("anthropic/claude-opus-5"), Some("Anthropic Claude"));
+        assert_eq!(model_family("openai/gpt-5.6-pro"), Some("ChatGPT / OpenAI"));
+        assert_eq!(model_family("openai/o3"), Some("ChatGPT / OpenAI"));
+        assert_eq!(model_family("x-ai/grok-4.5"), Some("xAI Grok"));
+        assert_eq!(model_family("google/gemini-3.5-flash"), Some("Google Gemini"));
+        assert_eq!(model_family("qwen/qwen3.8-27b"), Some("Alibaba Qwen"));
+        assert_eq!(model_family("moonshotai/kimi-k3"), Some("Moonshot Kimi"));
+        assert_eq!(model_family("z-ai/glm-5.2"), Some("Zhipu GLM"));
+    }
+
+    #[test]
+    fn leaves_unknown_models_unclassified() {
+        assert_eq!(model_family("some-custom/weird"), None);
+        assert_eq!(model_family("private/forbidden-model"), None);
+        assert_eq!(model_family(""), None);
+    }
 }
