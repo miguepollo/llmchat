@@ -892,9 +892,8 @@ impl eframe::App for App {
                             let total = self.settings.models.len();
 
                             // Agrupa los modelos por familia (Claude, DeepSeek,
-                            // ChatGPT…, y "Otros" para los no clasificados),
-                            // manteniendo el orden de primera aparición y
-                            // respetando el filtro de búsqueda.
+                            // OpenAI, Kimi, Grok; el resto en "Otros"), respetando
+                            // el filtro de búsqueda.
                             let mut groups: Vec<(&'static str, Vec<String>)> = Vec::new();
                             for m in &self.settings.models {
                                 if !query.is_empty() && !m.to_lowercase().contains(&query) {
@@ -906,6 +905,12 @@ impl eframe::App for App {
                                     None => groups.push((fam, vec![m.clone()])),
                                 }
                             }
+                            // Orden alfabético de los grupos, dejando "Otros" el último.
+                            groups.sort_by(|a, b| {
+                                let ak = if a.0 == "Otros" { "\u{10FFFF}" } else { a.0 };
+                                let bk = if b.0 == "Otros" { "\u{10FFFF}" } else { b.0 };
+                                ak.cmp(bk)
+                            });
                             let shown: u32 = groups.iter().map(|(_, l)| l.len() as u32).sum();
 
                             for (fam, list) in &groups {
@@ -915,7 +920,7 @@ impl eframe::App for App {
                                         .strong()
                                         .color(TEXT_MAIN),
                                 )
-                                .default_open(true)
+                                .default_open(false)
                                 .show(ui, |ui| {
                                     for m in list {
                                         if ui
@@ -1696,35 +1701,25 @@ fn render_typing_indicator(ui: &mut egui::Ui, scale: f32) {
 // ---------------------------------------------------------------------------
 
 /// Devuelve la familia a la que pertenece un id de modelo según su nombre.
-/// Los proveedores agregan un prefijo `proveedor/modelo` (por ejemplo
-/// `deepseek/deepseek-v4`, `openai/gpt-5`, `anthropic/claude-opus-5`,
-/// `qwen/qwen3`, `~x-ai/grok-latest`, etc.); aquí detectamos las familias más
-/// comunes para agruparlas en el selector. Devuelve `None` para modelos que no
-/// encajan en ninguna familia reconocida (se mostrarán en un grupo "Otros").
+/// Solo agrupamos los proveedores más habituales (Claude, DeepSeek, OpenAI,
+/// Kimi y Grok); cualquier otro modelo devuelve `None` y se mostrará bajo el
+/// grupo "Otros" del selector.
 fn model_family(id: &str) -> Option<&'static str> {
     let name = id.to_lowercase();
 
     // Pares (fragmento, etiqueta). Se comprueban de arriba a abajo y gana la
-    // primera coincidencia: las familias con prefijos más específicos
-    // (gpt-oss, gpt-image, dall-e) van antes que "gpt" y que "o3-…".
+    // primera coincidencia: los prefijos más específicos (gpt-oss, gpt-image,
+    // dall-e) van antes que "gpt"; y "openai/o…" cubre la serie «o» de OpenAI.
     let families: &[(&str, &str)] = &[
-        ("claude", "Anthropic Claude"),
+        ("claude", "Claude"),
         ("deepseek", "DeepSeek"),
-        ("grok", "xAI Grok"),
-        ("gemini", "Google Gemini"),
-        ("gemma", "Google Gemma"),
-        ("gpt-oss", "OpenAI GPT-oss"),
-        ("gpt-image", "OpenAI Imagen"),
-        ("dall-e", "OpenAI DALL·E"),
-        ("gpt", "ChatGPT / OpenAI"),
-        ("openai/o", "ChatGPT / OpenAI"),
-        ("qwen", "Alibaba Qwen"),
-        ("kimi", "Moonshot Kimi"),
-        ("glm", "Zhipu GLM"),
-        ("mistral", "Mistral"),
-        ("mixtral", "Mistral"),
-        ("llama", "Meta Llama"),
-        ("command", "Cohere Command"),
+        ("grok", "Grok"),
+        ("kimi", "Kimi"),
+        ("gpt-oss", "OpenAI"),
+        ("gpt-image", "OpenAI"),
+        ("dall-e", "OpenAI"),
+        ("gpt", "OpenAI"),
+        ("openai/o", "OpenAI"),
     ];
     for (frag, label) in families {
         if name.contains(frag) {
@@ -1742,18 +1737,22 @@ mod tests {
     fn groups_common_providers() {
         assert_eq!(model_family("~deepseek/deepseek-v4-flash-latest"), Some("DeepSeek"));
         assert_eq!(model_family("deepseek/deepseek-r1"), Some("DeepSeek"));
-        assert_eq!(model_family("anthropic/claude-opus-5"), Some("Anthropic Claude"));
-        assert_eq!(model_family("openai/gpt-5.6-pro"), Some("ChatGPT / OpenAI"));
-        assert_eq!(model_family("openai/o3"), Some("ChatGPT / OpenAI"));
-        assert_eq!(model_family("x-ai/grok-4.5"), Some("xAI Grok"));
-        assert_eq!(model_family("google/gemini-3.5-flash"), Some("Google Gemini"));
-        assert_eq!(model_family("qwen/qwen3.8-27b"), Some("Alibaba Qwen"));
-        assert_eq!(model_family("moonshotai/kimi-k3"), Some("Moonshot Kimi"));
-        assert_eq!(model_family("z-ai/glm-5.2"), Some("Zhipu GLM"));
+        assert_eq!(model_family("anthropic/claude-opus-5"), Some("Claude"));
+        assert_eq!(model_family("openai/gpt-5.6-pro"), Some("OpenAI"));
+        assert_eq!(model_family("openai/gpt-oss-120b"), Some("OpenAI"));
+        assert_eq!(model_family("openai/o3"), Some("OpenAI"));
+        assert_eq!(model_family("x-ai/grok-4.5"), Some("Grok"));
+        assert_eq!(model_family("moonshotai/kimi-k3"), Some("Kimi"));
     }
 
     #[test]
-    fn leaves_unknown_models_unclassified() {
+    fn leaves_non_priority_models_in_others() {
+        // Fuera de las familias prioritarias (Claude/DeepSeek/OpenAI/Kimi/Grok),
+        // el modelo va al grupo "Otros" (None para la clasificación).
+        assert_eq!(model_family("google/gemini-3.5-flash"), None);
+        assert_eq!(model_family("qwen/qwen3.8-27b"), None);
+        assert_eq!(model_family("z-ai/glm-5.2"), None);
+        assert_eq!(model_family("meta-llama/llama-3.3"), None);
         assert_eq!(model_family("some-custom/weird"), None);
         assert_eq!(model_family("private/forbidden-model"), None);
         assert_eq!(model_family(""), None);
